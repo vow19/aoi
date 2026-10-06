@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 class OurDataset(Dataset):
     def __init__(self, root_path, df, val=False):
         self.root_path = root_path
-        self.df = df = df
+        self.df = df 
         self.val = val
 
         self.images = []
@@ -19,7 +19,9 @@ class OurDataset(Dataset):
         # print(self.labels)
         
         # 定義 transforms (大小正規化、數值正規化、轉tensor)
-        self.transform = transforms.Compose([
+        if not self.val:
+            # 訓練集：包含隨機翻轉資料增強
+            self.transform = transforms.Compose([
                 transforms.ToPILImage(),
                 transforms.Resize((224, 224)),
                 transforms.RandomHorizontalFlip(p=0.5),
@@ -27,7 +29,14 @@ class OurDataset(Dataset):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
-        self.load_data()
+        else:
+            # 驗證集：純粹縮放與正規化，不使用隨機增強
+            self.transform = transforms.Compose([
+                transforms.ToPILImage(),
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
         
 
     
@@ -67,9 +76,10 @@ if __name__ == "__main__":
 
     for item in dataloader:
         image, label = item
-        print(f"image: {image}")
-        print(f"label: {label}")
+        # print(f"image: {image}")
+        # print(f"label: {label}")
         print(f"images shape: {image.shape}")
         print(f"labels shape: {label.shape}")
-        exit()
+        break
+        # exit()
         # pass
