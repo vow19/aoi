@@ -38,8 +38,8 @@ SEARCH_EPOCH = 15
 
 # Grid Search 超參數搜尋網格
 PARAM_GRID = {
-    "lr": [0.0001​],
-    "batch_size": [16,32],
+    "lr": [0.0001],
+    "batch_size": [16, 32],
     "weight_decay": [1e-2, 1e-4]
 }
 
