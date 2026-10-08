@@ -1,5 +1,6 @@
 import cv2
 import pandas as pd
+from pathlib import Path
 
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
@@ -45,6 +46,7 @@ class OurDataset(Dataset):
         label = self.labels[index]
 
         image = cv2.imread(image)
+
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) #OpenCV預設BGR 
 
         # image = PIL.Image.open(image).convert('RGB')
@@ -62,7 +64,7 @@ class OurDataset(Dataset):
     def load_data(self):
 
         for _, row in self.df.iterrows():
-            image_path = f"{self.root_path}/{row['ID']}"
+            image_path = str(Path(self.root_path) / str(row['ID']))
             label =  int(row['Label'])
             self.images.append(image_path)
             self.labels.append(label)

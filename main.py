@@ -13,7 +13,8 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support  ### 【新增指標】：引入評估工具
 
-from model import build_model
+
+from model import build_model, measure_model_resources
 from dataset import OurDataset
 from utils import split_train_val
 
@@ -48,8 +49,8 @@ PARAM_GRID = {
     "weight_decay": [1e-2, 1e-4]
 }
 # 正式實驗與搜尋分開；門檻須在 pilot 後、正式實驗前固定。
-FORMAL_EPOCH = 30
-FORMAL_SEEDS = [42, 43, 44]
+FORMAL_EPOCH = 50
+FORMAL_SEEDS = [42]
 SEARCH_SEED = 42
 TARGET_F1 = 0.98  # pilot 暫定值，可先依 ResNet50 learning curve 調整。
 
@@ -123,8 +124,7 @@ def val(loader, model, criterion=None):
     ### 計算 Accuracy, Macro Precision, Macro Recall, Macro F1
     acc = accuracy_score(all_labels, all_preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average="macro", zero_division=0
-    )
+        all_labels, all_preds, labels=list(range(NUMBER_CLASSES)), average="macro", zero_division=0)
     return acc, precision, recall, f1
 
 #　以下為正式 benchmark；固定 FP32、30 epochs，不做 early stopping。
@@ -180,7 +180,9 @@ def run_formal_experiments(train_set, val_set, params):
         "search_epochs": SEARCH_EPOCH,
         "evaluation_scope": "validation; used for tuning, not independent test",
         "timing_scope": "train+validation, including data loading; excluding checkpoints",
-        "memory_scope": "peak CUDA allocated during training, excluding validation"
+        "memory_scope": "peak CUDA allocated during training, excluding validation",
+        "compute_scope": "batch=1; Conv2d/Linear only; estimated FLOPs=2*MACs",
+        "inference_scope": "FP32 batch=1 forward only; excludes loading and CPU/GPU transfer"
     }
     with open(os.path.join(OUTPUT_DIR, "experiment_config.json"), "w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2, ensure_ascii=False)
@@ -230,15 +232,24 @@ def run_formal_experiments(train_set, val_set, params):
                                 "recall_macro": recall, "f1_macro": f1}
             print(f"Formal seed={seed}, epoch={epoch}/{FORMAL_EPOCH}, F1={f1:.4f}")
         pd.DataFrame(history).to_csv(prefix + "_history.csv", index=False)
+        torch.save({"model": cpu_state_dict(model), "model_name": MODEL_NAME,
+                    "params": params, "seed": seed, "epoch": FORMAL_EPOCH,
+                    "metrics": {"accuracy": acc, "precision_macro": precision,
+                                "recall_macro": recall, "f1_macro": f1}},
+                   prefix + "_final.pt")
         torch.save({"model": best_state, "model_name": MODEL_NAME, "params": params,
                     "seed": seed, "epoch": best_epoch, "metrics": best_metrics},
                    prefix + "_best.pt")
         final_metrics = {"final_accuracy": acc, "final_precision_macro": precision,
                          "final_recall_macro": recall, "final_f1_macro": f1}
         model.load_state_dict(best_state)
+        # 運算量量測在訓練結束後，不影響訓練峰值顯存。
+        resources = measure_model_resources(model)
         save_classification_details(val_loader, model, prefix)
         row = {
             "seed": seed, **best_metrics, **final_metrics, "best_epoch": best_epoch,
+            # 總參數量、MACs 與估算 FLOPs。
+            **resources,
             "target_reached": target_epoch is not None, "target_epoch": target_epoch,
             "time_to_target_seconds": target_seconds,
             "total_train_seconds": sum(item["train_seconds"] for item in history),
@@ -258,9 +269,26 @@ def run_formal_experiments(train_set, val_set, params):
 
     results = pd.DataFrame(records)
     # 達標時間的平均只涵蓋達標 runs，同時附 count，避免隱藏未達標情況。
-    summary = results.drop(columns=["seed"]).select_dtypes(include="number").agg(["mean", "std", "count"]).transpose()
-    summary.to_csv(os.path.join(OUTPUT_DIR, "formal_summary.csv"))
-    print("正式實驗完成；mean ± std 為固定切分下三個訓練種子的變異。")
+    # 分類表現採最佳驗證 checkpoint；效率及顯存涵蓋完整 50 epochs。
+    metric_layout = [
+        ("Performance", "Accuracy", "accuracy", "ratio"),
+        ("Performance", "Precision (macro)", "precision_macro", "ratio"),
+        ("Performance", "Recall (macro)", "recall_macro", "ratio"),
+        ("Performance", "Macro F1", "f1_macro", "ratio"),
+        ("Efficiency", "Train time", "total_train_seconds", "seconds"),
+        ("Efficiency", "Epoch time (mean train)", "mean_train_epoch_seconds", "seconds"),
+        ("Efficiency", "Inference time (mean, batch=1)", "inference_mean_ms", "ms/image"),
+        ("Resource", "Parameters", "parameters", "count"),
+        ("Resource", "MACs (Conv2d/Linear)", "macs_conv_linear", "MACs/image"),
+        ("Resource", "FLOPs (estimate, Conv2d/Linear)", "flops_conv_linear_estimate", "FLOPs/image"),
+        ("Resource", "Peak VRAM (training allocated)", "peak_training_allocated_MiB", "MiB"),
+    ]
+    summary = pd.DataFrame([
+        {"category": category, "metric": metric, "value": records[0][key], "unit": unit}
+        for category, metric, key, unit in metric_layout
+    ])
+    summary.to_csv(os.path.join(OUTPUT_DIR, "formal_summary.csv"), index=False)
+    print("正式實驗完成：單一種子、50 epochs；分類指標為最佳驗證 checkpoint。")
     print(f"達標次數：{int(results['target_reached'].sum())}/{len(results)}")
     print(summary)
 
