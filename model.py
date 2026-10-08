@@ -15,7 +15,8 @@ def build_model(model_name, num_classes):
 
 if __name__ == "__main__":
     # list_models()
-    model = build_model("resnet50.tv_in1k", num_classes=3)  # imagenet 1000 = 1K
+    # 此 AOI 任務有六類，示範輸出也統一為六類。
+    model = build_model("resnet50.tv_in1k", num_classes=6)  # imagenet 1000 = 1K
     # print(model)
 
     dummy_input = torch.randn(
