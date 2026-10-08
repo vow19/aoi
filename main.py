@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torchvision import transforms
+from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support  ### 【新增指標】：引入評估工具
 
@@ -17,10 +18,10 @@ from dataset import OurDataset
 from utils import split_train_val
 
 # ==================== 【本地/實驗室環境】 ====================
-# ROOT_CSV = "./data/train.csv"
-# ROOT_IMG = "./data/train_images"
+# ROOT_CSV = "/home/lafer/Lab/data/train.csv"
+# ROOT_IMG = "/home/lafer/Lab/data/train_images"
 # OUTPUT_DIR = "./output"
-# NUM_WORKERS = 8
+# NUM_WORKERS = 4
 
 # 【Kaggle 環境】
 ROOT_CSV = "/kaggle/input/datasets/lafer2003/aoi-data/train.csv"
