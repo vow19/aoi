@@ -63,7 +63,7 @@ class OurDataset(Dataset):
 
         for _, row in self.df.iterrows():
             image_path = f"{self.root_path}/{row['ID']}"
-            label = int['Label']
+            label =  int(row['Label'])
             self.images.append(image_path)
             self.labels.append(label)
 
