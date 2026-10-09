@@ -38,8 +38,8 @@ NUM_WORKERS = 4
 
 # 切換模型區
 # MODEL_NAME = "resnet50.tv_in1k"           # ResNet50（Baseline）
-MODEL_NAME = "mobilenetv2_100.ra_in1k"      # MobileNetV2（目前執行）
-# MODEL_NAME = "efficientnet_b0.ra_in1k"    # EfficientNet-B0
+# MODEL_NAME = "mobilenetv2_100.ra_in1k"      # MobileNetV2（目前執行）
+MODEL_NAME = "efficientnet_b0.ra_in1k"    # EfficientNet-B0
 # ========================================================
 
 # 各模型獨立資料夾，避免切換模型時覆蓋之前的結果
