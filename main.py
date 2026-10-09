@@ -7,35 +7,43 @@ import itertools
 import pandas as pd
 import torch
 import torch.nn as nn
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support  ### 【新增指標】：引入評估工具
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support  
 
 
 from model import build_model, measure_model_resources
 from dataset import OurDataset
 from utils import split_train_val
 
-# ==================== 【本地/實驗室環境】 ====================
+# 本地/實驗室環境
 # ROOT_CSV = "/home/lafer/Lab/data/train.csv"
 # ROOT_IMG = "/home/lafer/Lab/data/train_images"
-# OUTPUT_DIR = "./output"
 # NUM_WORKERS = 4
 
-# 【Kaggle 環境】
+# Kaggle 環境
 ROOT_CSV = "/kaggle/input/datasets/lafer2003/aoi-data/train.csv"
 ROOT_IMG = "/kaggle/input/datasets/lafer2003/aoi-data/train_images"
 OUTPUT_DIR = "/kaggle/working/output"
 NUM_WORKERS = 4
 # ========================================================
-
 # MAX_EPOCH = 100
 # BATCH_SIZE = 64
 # LR = 0.05
 
-MODEL_NAME = "resnet50.tv_in1k"
+# 切換模型區
+# MODEL_NAME = "resnet50.tv_in1k"           # ResNet50（Baseline）
+MODEL_NAME = "mobilenetv2_100.ra_in1k"      # MobileNetV2（目前執行）
+# MODEL_NAME = "efficientnet_b0.ra_in1k"    # EfficientNet-B0
+# ========================================================
+
+# 各模型獨立資料夾，避免切換模型時覆蓋之前的結果
+OUTPUT_DIR = os.path.join(OUTPUT_DIR, MODEL_NAME.replace(".", "_"))
 NUMBER_CLASSES = 6
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -49,10 +57,10 @@ PARAM_GRID = {
     "weight_decay": [1e-2, 1e-4]
 }
 # 正式實驗與搜尋分開；門檻須在 pilot 後、正式實驗前固定。
-FORMAL_EPOCH = 50
+FORMAL_EPOCH = 30
 FORMAL_SEEDS = [42]
 SEARCH_SEED = 42
-TARGET_F1 = 0.98  # pilot 暫定值，可先依 ResNet50 learning curve 調整。
+TARGET_F1 = 0.98  # pilot 暫定值
 
 def set_seed(seed):
     random.seed(seed)
@@ -83,23 +91,27 @@ def synchronize():
 
 
 def cpu_state_dict(model):
-    # 保存該 epoch 的獨立權重副本，不讓後續 optimizer 更新覆蓋它。
+    # 保存該 epoch 的獨立權重副本，不讓後續 optimizer 更新覆蓋它
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 def train_one_epoch(loader, optimizer, model, criterion):
     model.train()
     optimizer.zero_grad()
+    total_loss, total_samples = 0.0, 0
 
     for image, label in tqdm(loader, desc="Training", leave=False):
         image, label = image.to(DEVICE), label.to(DEVICE)
 
         output = model(image)
         loss = criterion(output, label)
+        total_loss += loss.item() * image.size(0)
+        total_samples += image.size(0)
 
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+    return total_loss / total_samples
 
 
 @torch.no_grad()
@@ -107,12 +119,15 @@ def val(loader, model, criterion=None):
     model.eval()
     all_preds = []
     all_labels = []
+    total_loss, total_samples = 0.0, 0
 
     for index, (image, label) in enumerate(tqdm(loader, desc="Evaluating", leave=False)):
         image, label = image.to(DEVICE), label.to(DEVICE)
 
         output = model(image)  # [Batch, num_classes]
-        # loss = criterion(output, label)
+        if criterion is not None:
+            total_loss += criterion(output, label).item() * image.size(0)
+            total_samples += image.size(0)
 
         # calculate accuracy
         preds = torch.argmax(output, dim=1)
@@ -125,9 +140,25 @@ def val(loader, model, criterion=None):
     acc = accuracy_score(all_labels, all_preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_labels, all_preds, labels=list(range(NUMBER_CLASSES)), average="macro", zero_division=0)
-    return acc, precision, recall, f1
+    return acc, precision, recall, f1, (total_loss / total_samples if criterion is not None else None)
 
-#　以下為正式 benchmark；固定 FP32、30 epochs，不做 early stopping。
+
+# 類別名稱與資料集 Label 0–5 對應
+CLASS_NAMES = ["Normal", "Void", "Horizontal", "Vertical", "Edge", "Particle"]
+
+
+def plot_loss(history, prefix):
+    epochs = [item["epoch"] for item in history]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(epochs, [item["train_loss"] for item in history], label="Train Loss")
+    ax.plot(epochs, [item["val_loss"] for item in history], label="Validation Loss")
+    ax.set(xlabel="Epoch", ylabel="Cross-Entropy Loss", title=f"{MODEL_NAME} - Loss Curve")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(prefix + "_loss_curve.png", dpi=200)
+    plt.close(fig)
+
 @torch.no_grad()
 def benchmark_inference(model, repeats=200, warmup=30):
     model.eval()
@@ -160,13 +191,27 @@ def save_classification_details(loader, model, prefix):
         labels.extend(label.tolist())
         predictions.extend(output.argmax(dim=1).cpu().tolist())
     class_ids = list(range(NUMBER_CLASSES))
-    pd.DataFrame(confusion_matrix(labels, predictions, labels=class_ids),
-                 index=class_ids, columns=class_ids).to_csv(prefix + "_confusion_matrix.csv")
+    cm = confusion_matrix(labels, predictions, labels=class_ids)
+    pd.DataFrame(cm, index=CLASS_NAMES, columns=CLASS_NAMES).to_csv(prefix + "_confusion_matrix.csv")
+    fig, ax = plt.subplots(figsize=(8, 7))
+    im = ax.imshow(cm, cmap="Blues")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_xticks(class_ids, CLASS_NAMES, rotation=35, ha="right")
+    ax.set_yticks(class_ids, CLASS_NAMES)
+    ax.set(xlabel="Predicted label", ylabel="True label", title=f"{MODEL_NAME} - Best Validation Confusion Matrix")
+    threshold = cm.max() / 2
+    for i in range(NUMBER_CLASSES):
+        for j in range(NUMBER_CLASSES):
+            ax.text(j, i, str(cm[i, j]), ha="center", va="center",
+                    color="white" if cm[i, j] > threshold else "black")
+    fig.tight_layout()
+    fig.savefig(prefix + "_confusion_matrix.png", dpi=200)
+    plt.close(fig)
     report = classification_report(labels, predictions, labels=class_ids,
                                    output_dict=True, zero_division=0)
     pd.DataFrame(report).transpose().to_csv(prefix + "_classification_report.csv")
 
-
+# 正式實驗固定 FP32，訓練輪次由 FORMAL_EPOCH 設定，不做 early stopping。
 def run_formal_experiments(train_set, val_set, params):
     records = []
     metadata = {
@@ -206,18 +251,19 @@ def run_formal_experiments(train_set, val_set, params):
             if DEVICE == "cuda":
                 torch.cuda.reset_peak_memory_stats()
             start = time.perf_counter()
-            train_one_epoch(train_loader, optimizer, model, criterion)
+            train_loss = train_one_epoch(train_loader, optimizer, model, criterion)
             synchronize()
             train_seconds = time.perf_counter() - start
             if DEVICE == "cuda":
                 peak_training_memory = max(peak_training_memory, torch.cuda.max_memory_allocated())
             start = time.perf_counter()
-            acc, precision, recall, f1 = val(val_loader, model, criterion)
+            acc, precision, recall, f1, val_loss = val(val_loader, model, criterion)
             synchronize()
             val_seconds = time.perf_counter() - start
             cumulative_seconds += train_seconds + val_seconds
             history.append({
-                "epoch": epoch, "accuracy": acc, "precision_macro": precision,
+                "epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
+                "accuracy": acc, "precision_macro": precision,
                 "recall_macro": recall, "f1_macro": f1,
                 "train_seconds": train_seconds, "val_seconds": val_seconds,
                 "train_plus_val_seconds": train_seconds + val_seconds,
@@ -232,6 +278,7 @@ def run_formal_experiments(train_set, val_set, params):
                                 "recall_macro": recall, "f1_macro": f1}
             print(f"Formal seed={seed}, epoch={epoch}/{FORMAL_EPOCH}, F1={f1:.4f}")
         pd.DataFrame(history).to_csv(prefix + "_history.csv", index=False)
+        plot_loss(history, prefix)
         torch.save({"model": cpu_state_dict(model), "model_name": MODEL_NAME,
                     "params": params, "seed": seed, "epoch": FORMAL_EPOCH,
                     "metrics": {"accuracy": acc, "precision_macro": precision,
@@ -243,12 +290,12 @@ def run_formal_experiments(train_set, val_set, params):
         final_metrics = {"final_accuracy": acc, "final_precision_macro": precision,
                          "final_recall_macro": recall, "final_f1_macro": f1}
         model.load_state_dict(best_state)
-        # 運算量量測在訓練結束後，不影響訓練峰值顯存。
+        # 運算量量測在訓練結束後，不影響訓練峰值顯存
         resources = measure_model_resources(model)
         save_classification_details(val_loader, model, prefix)
         row = {
             "seed": seed, **best_metrics, **final_metrics, "best_epoch": best_epoch,
-            # 總參數量、MACs 與估算 FLOPs。
+            # 總參數量、MACs 與估算 FLOPs
             **resources,
             "target_reached": target_epoch is not None, "target_epoch": target_epoch,
             "time_to_target_seconds": target_seconds,
@@ -260,7 +307,7 @@ def run_formal_experiments(train_set, val_set, params):
             "trainable_parameters": sum(x.numel() for x in model.parameters() if x.requires_grad),
             **benchmark_inference(model)
         }
-        # 未達門檻記為空值，不能以第 30 epoch 假裝達標。
+        # 未達門檻記為空值，不能以最後一個 epoch 假裝達標。
         records.append(row)
         pd.DataFrame(records).to_csv(os.path.join(OUTPUT_DIR, "formal_results.csv"), index=False)
         del optimizer, model, best_state
@@ -269,7 +316,7 @@ def run_formal_experiments(train_set, val_set, params):
 
     results = pd.DataFrame(records)
     # 達標時間的平均只涵蓋達標 runs，同時附 count，避免隱藏未達標情況。
-    # 分類表現採最佳驗證 checkpoint；效率及顯存涵蓋完整 50 epochs。
+    # 分類表現採最佳驗證 checkpoint；效率及顯存涵蓋完整 FORMAL_EPOCH。
     metric_layout = [
         ("Performance", "Accuracy", "accuracy", "ratio"),
         ("Performance", "Precision (macro)", "precision_macro", "ratio"),
@@ -288,7 +335,7 @@ def run_formal_experiments(train_set, val_set, params):
         for category, metric, key, unit in metric_layout
     ])
     summary.to_csv(os.path.join(OUTPUT_DIR, "formal_summary.csv"), index=False)
-    print("正式實驗完成：單一種子、50 epochs；分類指標為最佳驗證 checkpoint。")
+    print(f"正式實驗完成：單一種子、{FORMAL_EPOCH} epochs；分類指標為最佳驗證 checkpoint。")
     print(f"達標次數：{int(results['target_reached'].sum())}/{len(results)}")
     print(summary)
 
@@ -353,11 +400,11 @@ def main():
 
         # 開始單一組合的訓練輪次
         for epoch in range(SEARCH_EPOCH):
-            train_one_epoch(train_loader, optimizer, model, criterion)
-            acc, precision, recall, f1 = val(val_loader, model, criterion)
+            train_loss = train_one_epoch(train_loader, optimizer, model, criterion)
+            acc, precision, recall, f1, val_loss = val(val_loader, model, criterion)
 
             # 搜尋階段曲線供 pilot 檢查。
-            combo_history.append({"epoch": epoch + 1, "accuracy": acc,
+            combo_history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss, "accuracy": acc,
                                   "precision": precision, "recall": recall, "f1_macro": f1})
             if f1 > best_combo_f1:
                 best_combo_f1 = f1
@@ -411,12 +458,10 @@ def main():
     results_csv_path = os.path.join(OUTPUT_DIR, "grid_search_results.csv")
     results_df.to_csv(results_csv_path, index=False)
 
-    print("\n" + "=" * 50)
     print("Grid Search 搜尋完成")
     print(f"最佳參數組合: {best_params}")
     print(f"最高 Macro F1: {best_global_f1:.4f}")
     print(f"完整結果已存入: {results_csv_path}")
-    print("=" * 50)
     print(results_df.sort_values(by="f1_macro", ascending=False).to_string(index=False))
     run_formal_experiments(train_set, val_set, best_params)
 
